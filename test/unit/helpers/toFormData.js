@@ -3,8 +3,144 @@ import toFormData from '../../../lib/helpers/toFormData.js';
 import AxiosError from '../../../lib/core/AxiosError.js';
 import AxiosURLSearchParams from '../../../lib/helpers/AxiosURLSearchParams.js';
 import FormData from 'form-data';
+import axios from '../../../index.js';
 
 describe('helpers::toFormData', function () {
+  const createFormDataSpy = function () {
+    return {
+      calls: [],
+      append(key, value) {
+        this.calls.push([key, value]);
+      },
+    };
+  };
+
+  describe('options inherited from Object.prototype', function () {
+    afterEach(function () {
+      delete Object.prototype.visitor;
+      delete Object.prototype.maxDepth;
+    });
+
+    it('should ignore a visitor inherited only from Object.prototype', function () {
+      let called = false;
+      Object.prototype.visitor = function () {
+        called = true;
+        return false;
+      };
+
+      try {
+        const formData = createFormDataSpy();
+        toFormData({ field: 'value' }, formData);
+
+        assert.strictEqual(called, false);
+        assert.deepStrictEqual(formData.calls, [['field', 'value']]);
+      } finally {
+        delete Object.prototype.visitor;
+      }
+    });
+
+    it('should ignore maxDepth inherited only from Object.prototype', function () {
+      Object.prototype.maxDepth = 0;
+
+      try {
+        const formData = createFormDataSpy();
+        assert.doesNotThrow(() => toFormData({ nested: { field: 'value' } }, formData));
+        assert.deepStrictEqual(formData.calls, [['nested[field]', 'value']]);
+      } finally {
+        delete Object.prototype.maxDepth;
+      }
+    });
+
+    it('should ignore an inherited visitor when an options object without one is passed', function () {
+      let called = false;
+      Object.prototype.visitor = function () {
+        called = true;
+        this.append('injected', 'yes');
+        return false;
+      };
+
+      try {
+        const formData = createFormDataSpy();
+        toFormData({ nested: { field: 'value' } }, formData, { dots: true });
+
+        assert.strictEqual(called, false);
+        assert.deepStrictEqual(formData.calls, [['nested.field', 'value']]);
+      } finally {
+        delete Object.prototype.visitor;
+      }
+    });
+
+    it('should still honor own visitor and maxDepth options', function () {
+      const seen = [];
+      const formData = createFormDataSpy();
+
+      toFormData({ field: 'value' }, formData, {
+        visitor(value, key) {
+          seen.push([key, value]);
+          return false;
+        },
+      });
+
+      assert.deepStrictEqual(seen, [['field', 'value']]);
+      assert.deepStrictEqual(formData.calls, []);
+
+      assert.throws(
+        () => toFormData({ nested: { field: 'value' } }, createFormDataSpy(), { maxDepth: 0 }),
+        (err) => err instanceof AxiosError && err.code === 'ERR_FORM_DATA_DEPTH_EXCEEDED'
+      );
+    });
+
+    it('should not let an inherited visitor rewrite multipart request bodies', async function () {
+      class SpyFormData {
+        constructor() {
+          this.calls = [];
+        }
+
+        append(key, value) {
+          this.calls.push([key, value]);
+        }
+      }
+
+      let called = false;
+      Object.prototype.visitor = function () {
+        called = true;
+        this.append('injected', 'yes');
+        return false;
+      };
+
+      try {
+        let sentData;
+
+        await axios.post(
+          'http://localhost/upload',
+          { field: 'value' },
+          {
+            headers: { 'Content-Type': 'multipart/form-data' },
+            env: { FormData: SpyFormData },
+            adapter(config) {
+              sentData = config.data;
+
+              return Promise.resolve({
+                data: null,
+                status: 200,
+                statusText: 'OK',
+                headers: {},
+                config,
+                request: {},
+              });
+            },
+          }
+        );
+
+        assert.strictEqual(called, false);
+        assert.ok(sentData instanceof SpyFormData);
+        assert.deepStrictEqual(sentData.calls, [['field', 'value']]);
+      } finally {
+        delete Object.prototype.visitor;
+      }
+    });
+  });
+
   // --- Depth limit tests ---
 
   function nest(depth) {

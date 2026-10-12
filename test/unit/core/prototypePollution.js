@@ -407,6 +407,46 @@ describe("Prototype Pollution Protection", function () {
     });
   });
 
+  // GHSA-w9j2-pvgh-6h63: mergeDirectKeys must not inherit validateStatus from
+  // Object.prototype (was using the `in` operator which traverses the chain).
+  describe("GHSA-w9j2-pvgh-6h63 validateStatus merge", function () {
+    let server;
+
+    afterEach(async function () {
+      await stopServer(server);
+      server = null;
+    });
+
+    it("should not inherit a polluted validateStatus during mergeConfig", function () {
+      Object.prototype.validateStatus = function () { return true; };
+
+      const merged = mergeConfig(defaults, { url: "/x" });
+
+      assert.strictEqual(merged.validateStatus, defaults.validateStatus);
+    });
+
+    it("should keep 4xx/5xx responses rejected when Object.prototype.validateStatus is polluted", async function () {
+      this.timeout(10000);
+      Object.prototype.validateStatus = function () { return true; };
+
+      server = await startServer(function (req, res) {
+        res.setHeader("Connection", "close");
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end('{"error":"unauthorized"}');
+      });
+
+      let threw = false;
+      try {
+        await axios.get(serverURL(server) + "/");
+      } catch (err) {
+        threw = true;
+        assert.ok(err.response, "expected an HTTP error response");
+        assert.strictEqual(err.response.status, 401);
+      }
+      assert.strictEqual(threw, true, "401 response was resolved instead of rejected");
+    });
+  });
+
   describe("axios request config", function () {
     it("should not crash when request config has own __proto__ key", function () {
       const malicious = JSON.parse(

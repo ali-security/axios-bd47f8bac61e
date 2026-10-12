@@ -53,6 +53,27 @@ describe('utils', function (){
       }
       assert.equal(utils.isFormData(new FormData()), true);
     });
+
+    it('should not treat plain objects as FormData when Object.prototype is polluted (GHSA-6chq-wfr3-2hj9)', () => {
+      Object.prototype[Symbol.toStringTag] = 'FormData';
+      Object.prototype.append = () => {};
+
+      try {
+        assert.strictEqual(utils.isFormData({userId: 42}), false);
+        assert.strictEqual(utils.isFormData(JSON.parse('{"userId": 42}')), false);
+
+        const nullProto = Object.create(null);
+        nullProto.append = () => {};
+        nullProto[Symbol.toStringTag] = 'FormData';
+        assert.strictEqual(utils.isFormData(nullProto), false);
+
+        // genuine form-data instances are still detected
+        assert.strictEqual(utils.isFormData(new FormData()), true);
+      } finally {
+        delete Object.prototype.append;
+        delete Object.prototype[Symbol.toStringTag];
+      }
+    });
   });
 
   describe('toJSON', function (){

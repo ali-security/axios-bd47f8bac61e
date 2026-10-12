@@ -2003,6 +2003,148 @@ describe('supports http with nodejs', function () {
       });
     });
 
+    describe('prototype pollution (GHSA-6chq-wfr3-2hj9)', function () {
+      const pollutedKeys = ['getHeaders', 'append', 'pipe', 'on', 'once'];
+      const toStringTagSym = Symbol.toStringTag;
+
+      function pollute() {
+        Object.prototype[toStringTagSym] = 'FormData';
+        Object.prototype.append = () => {};
+        Object.prototype.getHeaders = () => ({
+          'x-injected': 'attacker',
+          'authorization': 'Bearer ATTACKER_TOKEN',
+        });
+        Object.prototype.pipe = function (d) { if (d && d.end) d.end(); return d; };
+        Object.prototype.on = function () { return this; };
+        Object.prototype.once = function () { return this; };
+      }
+
+      // Advisory PoC variant: the polluted getHeaders() returns a null-prototype header bag.
+      // Unlike an object literal, it still passes AxiosHeaders#set's isPlainObject check while
+      // Object.prototype[Symbol.toStringTag] is polluted, so the injected headers would really
+      // reach the wire if axios invoked the inherited getHeaders().
+      function polluteWithNullProtoHeaders() {
+        pollute();
+        Object.prototype.getHeaders = () => {
+          const injected = Object.create(null);
+          injected['x-injected'] = 'attacker';
+          injected['authorization'] = 'Bearer ATTACKER_TOKEN';
+          return injected;
+        };
+      }
+
+      function cleanup() {
+        for (const k of pollutedKeys) delete Object.prototype[k];
+        delete Object.prototype[toStringTagSym];
+      }
+
+      async function postWhilePolluted(polluteFn, payload) {
+        let receivedHeaders;
+        const server = await startHTTPServer(
+          (req, res) => {
+            receivedHeaders = req.headers;
+            req.resume();
+            req.on('end', () => res.end('{}'));
+          },
+          { port: 4444 }
+        );
+
+        try {
+          polluteFn();
+          await axios.post(
+            `http://localhost:${server.address().port}/`,
+            payload,
+            { headers: { 'Authorization': 'Bearer VALID_USER_TOKEN' } }
+          );
+        } finally {
+          cleanup();
+          await stopHTTPServer(server);
+        }
+
+        return receivedHeaders;
+      }
+
+      it('should not merge prototype-polluted getHeaders into outgoing request', async function () {
+        this.timeout(10000);
+        let receivedHeaders;
+        const server = await startHTTPServer(
+          (req, res) => {
+            receivedHeaders = req.headers;
+            res.end('{}');
+          },
+          { port: 4444 }
+        );
+
+        try {
+          pollute();
+          await axios.post(
+            `http://localhost:${server.address().port}/`,
+            { userId: 42 },
+            { headers: { 'Authorization': 'Bearer VALID_USER_TOKEN' } }
+          );
+        } finally {
+          cleanup();
+          await stopHTTPServer(server);
+        }
+
+        assert.ok(receivedHeaders, 'request did not reach server');
+        assert.strictEqual(receivedHeaders['x-injected'], undefined);
+        assert.notStrictEqual(receivedHeaders['authorization'], 'Bearer ATTACKER_TOKEN');
+      });
+
+      it('should not inject headers from a polluted getHeaders when posting a plain object', async function () {
+        this.timeout(10000);
+
+        const receivedHeaders = await postWhilePolluted(polluteWithNullProtoHeaders, { userId: 42 });
+
+        assert.ok(receivedHeaders, 'request did not reach server');
+        assert.strictEqual(receivedHeaders['x-injected'], undefined);
+        assert.notStrictEqual(receivedHeaders['authorization'], 'Bearer ATTACKER_TOKEN');
+      });
+
+      it('should not invoke an inherited Object.prototype.getHeaders for class-instance payloads', async function () {
+        this.timeout(10000);
+
+        // A class instance has a non-plain prototype, so under pollution it still looks like
+        // FormData (inherited append + toStringTag); only the getHeaders own-source guard in the
+        // http adapter keeps the polluted getHeaders() from being called.
+        class Payload {
+          constructor() {
+            this.userId = 42;
+          }
+        }
+
+        const receivedHeaders = await postWhilePolluted(polluteWithNullProtoHeaders, new Payload());
+
+        assert.ok(receivedHeaders, 'request did not reach server');
+        assert.strictEqual(receivedHeaders['x-injected'], undefined);
+        assert.notStrictEqual(receivedHeaders['authorization'], 'Bearer ATTACKER_TOKEN');
+      });
+
+      it('should not invoke an inherited Object.prototype.getHeaders for stream payloads', async function () {
+        this.timeout(10000);
+
+        // Streams have their own pipe/on/once, so polluting just toStringTag, append and getHeaders
+        // is enough to make a streamed upload look like a form-data instance.
+        const payload = stream.Readable.from([Buffer.from('payload')]);
+
+        const receivedHeaders = await postWhilePolluted(() => {
+          Object.prototype[toStringTagSym] = 'FormData';
+          Object.prototype.append = () => {};
+          Object.prototype.getHeaders = () => {
+            const injected = Object.create(null);
+            injected['x-injected'] = 'attacker';
+            injected['authorization'] = 'Bearer ATTACKER_TOKEN';
+            return injected;
+          };
+        }, payload);
+
+        assert.ok(receivedHeaders, 'request did not reach server');
+        assert.strictEqual(receivedHeaders['x-injected'], undefined);
+        assert.notStrictEqual(receivedHeaders['authorization'], 'Bearer ATTACKER_TOKEN');
+      });
+    });
+
     describe('toFormData helper', function () {
       it('should properly serialize nested objects for parsing with multer.js (express.js)', function (done) {
         var app = express();

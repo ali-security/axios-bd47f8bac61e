@@ -33,4 +33,52 @@ describe('helpers::cookies', function () {
     cookies.write('foo', 'bar baz%');
     expect(document.cookie).toEqual('foo=bar%20baz%25');
   });
+
+  it('reads cookies when the cookie separator has no following space', function () {
+    const descriptor = Object.getOwnPropertyDescriptor(document, 'cookie');
+
+    Object.defineProperty(document, 'cookie', {
+      configurable: true,
+      get() {
+        return 'foo=abc;bar=def';
+      },
+    });
+
+    try {
+      expect(cookies.read('bar')).toEqual('def');
+    } finally {
+      if (descriptor) {
+        Object.defineProperty(document, 'cookie', descriptor);
+      } else {
+        delete document.cookie;
+      }
+    }
+  });
+
+  it('matches cookie names exactly even when the name contains regex metacharacters', function () {
+    // previously cookies.read built a RegExp by interpolating
+    // the requested name. Metacharacters could match a different cookie or trigger
+    // catastrophic backtracking. A name such as "X.Y" must not match a cookie called
+    // "XAY" set by the same site.
+    cookies.write('XAY', 'wrong');
+
+    expect(cookies.read('X.Y')).toEqual(null);
+  });
+
+  it('does not return a partial match for a name that is a prefix of another cookie', function () {
+    cookies.write('xsrf-token-extra', 'wrong');
+
+    expect(cookies.read('xsrf-token')).toEqual(null);
+  });
+
+  it('does not interpret the cookie name as a regular expression', function () {
+    // An unbalanced group in the name used to throw a SyntaxError from the
+    // RegExp constructor; a literal lookup must simply find nothing.
+    cookies.write('foo', 'bar');
+
+    expect(function () {
+      cookies.read('XSRF-TOKEN(');
+    }).not.toThrow();
+    expect(cookies.read('XSRF-TOKEN(')).toEqual(null);
+  });
 });

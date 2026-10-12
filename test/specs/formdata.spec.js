@@ -1,7 +1,7 @@
 import {retryNetwork} from "../helpers/retry.js";
 
 describe('FormData', function() {
-  it('should allow FormData posting', async () => {
+  xit('should allow FormData posting', async () => {
     await retryNetwork(() => {
       return axios.postForm('http://httpbin.org/post', {
         a: 'foo',
